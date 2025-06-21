@@ -82,15 +82,48 @@ public sealed class RabbitMQBus(IMediator mediator) : IEventBus
         await channel.QueueDeclareAsync(queue: eventName, durable: false, exclusive: false, autoDelete: false);
 
         var consumer = new AsyncEventingBasicConsumer(channel);
-        consumer.ReceivedAsync += async (model, ea) =>
-        {
-            var body = ea.Body.ToArray();
-            var message = System.Text.Encoding.UTF8.GetString(body);
-            await channel.BasicAckAsync(deliveryTag: ea.DeliveryTag, multiple: false);
-        };
+        consumer.ReceivedAsync += Consumer_Recieved;//delegate to handle received messages
 
         await channel.BasicConsumeAsync(queue: eventName, autoAck: true, consumer: consumer);
 
+    }
+    
+    private async Task Consumer_Recieved(object sender, BasicDeliverEventArgs ea)
+    {
+        var eventName = ea.RoutingKey;
+        var body = ea.Body.ToArray();
+        var message = System.Text.Encoding.UTF8.GetString(body);
+
+        try
+        {
+            await ProcessEventAsync(eventName, message).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            // Log the exception or handle it as needed
+            Console.WriteLine($"Error processing event {eventName}: {ex.Message}");
+        }
+        
+    }
+
+    private async Task ProcessEventAsync(string eventName, string message)
+    {
+        if(_handlers.ContainsKey(eventName))
+        {
+            var subscriptions = _handlers[eventName];
+            foreach (var subscription in subscriptions)
+            {
+                var handler = Activator.CreateInstance(subscription);
+                if (handler == null) continue;
+                var eventType = _eventTypes.SingleOrDefault(t => t.Name == eventName);
+                if (eventType == null) continue;
+                var @event = JsonSerializer.Deserialize(message, eventType);
+                if (@event == null) continue;
+                var handleMethod = subscription.GetMethod("Handle");
+                if (handleMethod == null) continue;
+                await (Task)handleMethod.Invoke(handler, [@event]);
+            }
+        }
     }
 
     private ConnectionFactory CreateConnectionFactory()
